@@ -339,6 +339,13 @@ impl LspClient {
                         continue;
                     }
                     if self.handle_server_notification(&message)? {
+                        // publishDiagnostics — keep collecting
+                        continue;
+                    }
+                    // Non-diagnostic notification, keep waiting rather than
+                    // stopping early (TSServer often sends $/typescriptVersion
+                    // before diagnostics are ready).
+                    if message.get("method").is_some() {
                         continue;
                     }
                     self.pending_messages

@@ -65,6 +65,10 @@ pub(super) fn run_workspace_symbol_query(
         config,
         |workspace, initialize, client| {
             ensure_workspace_symbol_support(initialize)?;
+            // Some language servers (notably TypeScript/tsserver) lazily load
+            // projects only after a file is opened.  Open one matching file
+            // so the server discovers the project before we query it.
+            warmup_workspace_for_symbols(client, &args.query.directory, config, workspace)?;
             let response = client.workspace_symbol(query).map_err(|error| {
                 error.with_prefix(format!("failed to query {}", workspace.server.server))
             })?;
@@ -77,6 +81,22 @@ pub(super) fn run_workspace_symbol_query(
         server: workspace.server,
         matches,
     })
+}
+
+/// Open the first matching file in the workspace to wake up LSP servers
+/// that lazily load projects (e.g. TypeScript/tsserver which returns
+/// "No Project" on workspace/symbol until a file triggers project discovery).
+fn warmup_workspace_for_symbols(
+    client: &mut LspClient,
+    directory: &Path,
+    config: &ConfigStore,
+    workspace: &PreparedWorkspace,
+) -> Result<()> {
+    let files = scan_workspace_files(directory, config, workspace).unwrap_or_default();
+    if let Some(file) = files.first() {
+        let _ = open_document_for(client, file, &workspace.server.server);
+    }
+    Ok(())
 }
 
 pub(super) fn run_document_symbol_query(

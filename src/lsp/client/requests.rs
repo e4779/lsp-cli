@@ -1,7 +1,7 @@
 use super::{IncomingMessage, LspClient, request_id};
 use crate::error::{Error, Result, error_fn};
 use crate::lsp::{InitializeResponse, parse_lsp_uri};
-use lsp_types::notification::{DidOpenTextDocument, Initialized};
+use lsp_types::notification::{DidChangeTextDocument, DidOpenTextDocument, Initialized};
 use lsp_types::request::{
     CallHierarchyIncomingCalls, CallHierarchyOutgoingCalls, CallHierarchyPrepare,
     DocumentDiagnosticRequest, DocumentSymbolRequest, Formatting, GotoDeclaration,
@@ -9,11 +9,13 @@ use lsp_types::request::{
 };
 use lsp_types::{
     CallHierarchyIncomingCallsParams, CallHierarchyItem, CallHierarchyOutgoingCallsParams,
-    CallHierarchyPrepareParams, ClientCapabilities, ClientInfo, DidOpenTextDocumentParams,
+    CallHierarchyPrepareParams, ClientCapabilities, ClientInfo, DidChangeTextDocumentParams,
+    DidOpenTextDocumentParams,
     DocumentDiagnosticParams, DocumentFormattingParams, DocumentSymbolParams, FormattingOptions,
     GeneralClientCapabilities, GotoDefinitionParams, InitializeParams, InitializedParams,
     PartialResultParams, Position, PositionEncodingKind, ReferenceContext, ReferenceParams,
-    TextDocumentIdentifier, TextDocumentItem, TextDocumentPositionParams, WindowClientCapabilities,
+    TextDocumentContentChangeEvent, TextDocumentIdentifier, TextDocumentItem,
+    TextDocumentPositionParams, WindowClientCapabilities,
     WorkDoneProgressParams, WorkspaceClientCapabilities, WorkspaceFolder, WorkspaceSymbolParams,
 };
 use serde_json::{Value, json};
@@ -28,15 +30,30 @@ impl LspClient {
         }
 
         let text = crate::fs::read_to_string(path)?;
-        let params = DidOpenTextDocumentParams {
-            text_document: TextDocumentItem::new(
-                parse_lsp_uri(uri, "document")?,
-                language_id(path).to_string(),
-                1,
-                text,
-            ),
+        let lang_id = language_id(path).to_string();
+        let lsp_uri = parse_lsp_uri(uri, "document")?;
+
+        // Open at version 1, then immediately send a full-content didChange.
+        // Some servers (notably TSServer/typescript-language-server) only
+        // start analysis after the first didChange, not after didOpen alone.
+        let open_params = DidOpenTextDocumentParams {
+            text_document: TextDocumentItem::new(lsp_uri.clone(), lang_id, 1, text.clone()),
         };
-        self.send_notification::<DidOpenTextDocument>(&params)?;
+        self.send_notification::<DidOpenTextDocument>(&open_params)?;
+
+        let change_params = DidChangeTextDocumentParams {
+            text_document: lsp_types::VersionedTextDocumentIdentifier::new(
+                lsp_uri,
+                2,
+            ),
+            content_changes: vec![TextDocumentContentChangeEvent {
+                range: None,
+                range_length: None,
+                text: text.clone(),
+            }],
+        };
+        self.send_notification::<DidChangeTextDocument>(&change_params)?;
+
         self.opened_documents.insert(uri.to_string());
         Ok(())
     }
