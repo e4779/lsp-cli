@@ -1,6 +1,6 @@
 use crate::error::{Error, Result};
 use crate::mason::install::{resolve_cached_program, resolve_or_install_program};
-use crate::mason::link::{is_command_runnable, rewrite_program};
+use crate::mason::link::{is_command_runnable, is_command_runnable_path, rewrite_program};
 use crate::mason::registry::MasonRegistry;
 use crate::runtime_state::{RuntimeState, default_runtime_state_root};
 use crate::suggest::SuggestedLanguage;
@@ -71,6 +71,14 @@ fn resolve_suggestion_from_path_or_cache(
         return Ok(Some(suggestion.clone()));
     }
 
+    // Check project-local node_modules/.bin/ — Node.js-based LSP servers
+    // (e.g. typescript-language-server) are commonly installed there rather
+    // than globally. Walk upward from workspace_root, stopping at filesystem
+    // boundaries or after a reasonable depth.
+    if let Some(local_path) = find_in_node_modules_bin(&suggestion.workspace_root, program) {
+        return Ok(Some(rewrite_program(suggestion, &local_path)));
+    }
+
     if program.contains(std::path::MAIN_SEPARATOR) {
         return Ok(None);
     }
@@ -130,9 +138,31 @@ fn install_suggestion(
     Ok(rewrite_program(suggestion, &executable_path))
 }
 
+/// Walk upward from `workspace_root` looking for `node_modules/.bin/<program>`.
+/// This covers the common Node.js layout where language servers are installed
+/// as project dependencies (e.g. typescript-language-server in a monorepo).
+/// Stops at filesystem boundaries or after a reasonable depth (10 levels).
+fn find_in_node_modules_bin(
+    workspace_root: &std::path::Path,
+    program: &str,
+) -> Option<std::path::PathBuf> {
+    const MAX_DEPTH: usize = 10;
+    for (i, dir) in workspace_root.ancestors().enumerate() {
+        if i >= MAX_DEPTH {
+            break;
+        }
+        let candidate = dir.join("node_modules").join(".bin").join(program);
+        if is_command_runnable_path(&candidate) {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::resolve_detect_suggestions;
+    use crate::suggest::SuggestedLanguage;
     use crate::test_support::{
         TestDir, env_var, jdtls_package, make_executable, pyright_package, runtime_state_in_home,
         suggested_language, with_env_vars, write_registry,
@@ -248,6 +278,86 @@ mod tests {
         );
 
         assert!(resolved.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn finds_server_in_project_node_modules_bin() {
+        let dir = TestDir::new("mason-resolve");
+        let home = dir.path().join("home");
+        fs::create_dir_all(&home).expect("home dir should be created");
+
+        let workspace = dir.path().join("project");
+        let bin = workspace.join("node_modules/.bin/typescript-language-server");
+        fs::create_dir_all(bin.parent().expect("parent should exist"))
+            .expect("node_modules/.bin dirs should be created");
+        fs::write(&bin, b"stub\n").expect("binary should be written");
+        make_executable(&bin);
+
+        let resolved = with_env_vars(
+            &[env_var("HOME", &home), env_var("PATH", "/nonexistent")],
+            || {
+                resolve_detect_suggestions(
+                    &[SuggestedLanguage {
+                        config_id: "ts".to_string(),
+                        languages: vec!["typescript".to_string()],
+                        server: "typescript-language-server".to_string(),
+                        command: vec![
+                            "typescript-language-server".to_string(),
+                            "--stdio".to_string(),
+                        ],
+                        workspace_root: workspace.clone(),
+                        wait_for_index: false,
+                    }],
+                    false,
+                )
+                .expect("resolution should succeed")
+            },
+        );
+
+        assert_eq!(resolved.len(), 1);
+        assert_eq!(resolved[0].command[0], bin.display().to_string());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn finds_server_in_parent_node_modules_bin() {
+        let dir = TestDir::new("mason-resolve");
+        let home = dir.path().join("home");
+        fs::create_dir_all(&home).expect("home dir should be created");
+
+        // Monorepo: binary is in root node_modules/.bin, workspace is a subdirectory
+        let root = dir.path().join("monorepo");
+        let workspace = root.join("packages/app");
+        let bin = root.join("node_modules/.bin/typescript-language-server");
+        fs::create_dir_all(bin.parent().expect("parent should exist"))
+            .expect("node_modules/.bin dirs should be created");
+        fs::write(&bin, b"stub\n").expect("binary should be written");
+        make_executable(&bin);
+
+        let resolved = with_env_vars(
+            &[env_var("HOME", &home), env_var("PATH", "/nonexistent")],
+            || {
+                resolve_detect_suggestions(
+                    &[SuggestedLanguage {
+                        config_id: "ts".to_string(),
+                        languages: vec!["typescript".to_string()],
+                        server: "typescript-language-server".to_string(),
+                        command: vec![
+                            "typescript-language-server".to_string(),
+                            "--stdio".to_string(),
+                        ],
+                        workspace_root: workspace.clone(),
+                        wait_for_index: false,
+                    }],
+                    false,
+                )
+                .expect("resolution should succeed")
+            },
+        );
+
+        assert_eq!(resolved.len(), 1);
+        assert_eq!(resolved[0].command[0], bin.display().to_string());
     }
 
     #[cfg(unix)]

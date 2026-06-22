@@ -381,7 +381,7 @@ fn ensure_executable(path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn is_command_runnable_path(path: &Path) -> bool {
+pub(crate) fn is_command_runnable_path(path: &Path) -> bool {
     match fs::metadata(path) {
         Ok(metadata) if metadata.is_file() => is_executable(&metadata.permissions()),
         Ok(_) | Err(_) => false,
